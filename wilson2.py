@@ -4,133 +4,132 @@ from tavily import TavilyClient
 import google.generativeai as genai
 import time
 import json
+import re
 
-# --- 1. 基礎設定 ---
-st.set_page_config(page_title="超級名單搜集器 (Secrets版)", layout="wide")
-st.title("📊 企業名單自動搜集 (已串接 Secrets)")
-st.markdown("專門解決「範圍太廣」的問題：AI 會自動將大關鍵字拆解成數十個精準搜尋詞。")
-
-# --- 2. 讀取 Secrets ---
-# 嘗試從 Streamlit Secrets 讀取金鑰
+# ==========================================
+# 🔑 設定 API Key (優先從 Secrets 讀取)
+# ==========================================
 try:
+    # 嘗試從 Streamlit Secrets 讀取
     tavily_api_key = st.secrets["TAVILY_API_KEY"]
     gemini_api_key = st.secrets["GEMINI_API_KEY"]
+    api_source = "Secrets"
+except:
+    # 如果沒設定 Secrets，預設為空 (需手動填寫或在代碼中填寫)
+    tavily_api_key = ""
+    gemini_api_key = ""
+    api_source = "None"
+
+# --- 1. 基礎設定 ---
+st.set_page_config(page_title="企業名單搜集器 (修復版)", layout="wide")
+st.title("📊 企業名單自動搜集 (修復版)")
+st.markdown("已修正 AI 模型連線問題，並加強電話與 Email 的提取能力。")
+
+if api_source == "Secrets":
     st.success("✅ 已成功從 Secrets 載入 API Keys")
-except FileNotFoundError:
-    st.error("❌ 找不到 secrets.toml 文件，請確認是否已建立 .streamlit/secrets.toml")
-    st.stop()
-except KeyError as e:
-    st.error(f"❌ Secrets 設定檔中缺少變數：{e}，請確認變數名稱是否為 TAVILY_API_KEY 與 GEMINI_API_KEY")
-    st.stop()
+else:
+    st.warning("⚠️ 未偵測到 Secrets，請確認代碼中是否已填入 API Key，或於左側輸入。")
 
-# --- 3. 側邊欄參數 ---
+# --- 2. 側邊欄參數 ---
 with st.sidebar:
-    st.header("⚙️ 搜尋設定")
+    st.header("⚙️ 設定")
     
-    # 範圍 100 - 500
-    target_limit = st.slider("🎯 目標資料筆數", min_value=100, max_value=500, value=100, step=50)
-    st.info(f"設定 {target_limit} 筆時，AI 將會自動規劃約 {int(target_limit/10)+5} 組不同的關鍵字進行地毯式搜索。")
+    # 如果沒有 Secrets，開放手動輸入
+    if not tavily_api_key:
+        tavily_api_key = st.text_input("Tavily API Key", type="password")
+    if not gemini_api_key:
+        gemini_api_key = st.text_input("Gemini API Key", type="password")
+        
+    st.divider()
+    target_limit = st.slider("🎯 目標資料筆數", 100, 500, 100, 50)
+    st.info(f"目標：{target_limit} 筆。系統將自動執行多輪搜尋。")
 
-# --- 4. 主畫面 ---
+# --- 3. 主畫面 ---
 col1, col2 = st.columns([3, 1])
 with col1:
-    search_query = st.text_input("搜尋關鍵字 (例如：建築業、食品業、廢水處理)", value="廢水回收系統")
+    search_query = st.text_input("搜尋關鍵字", value="廢水回收系統")
 with col2:
     st.write(" ") 
     st.write(" ")
-    start_btn = st.button("🚀 AI 規劃並執行", type="primary", use_container_width=True)
+    start_btn = st.button("🚀 開始執行", type="primary", use_container_width=True)
 
-# --- 5. 執行邏輯 ---
+# --- 4. 執行邏輯 ---
 if start_btn:
+    if not tavily_api_key or not gemini_api_key:
+        st.error("❌ 缺少 API Key！")
+        st.stop()
 
-    # 初始化 API
+    # 初始化
     tavily = TavilyClient(api_key=tavily_api_key)
     genai.configure(api_key=gemini_api_key)
-    model = genai.GenerativeModel('gemini-1.5-pro')
-
-    # ==========================
-    # 階段零：AI 關鍵字裂變
-    # ==========================
-    status_box = st.status("🧠 AI 正在分析產業結構並規劃搜尋策略...", expanded=True)
     
-    # 計算需要多少個搜尋詞
-    needed_queries = int(target_limit / 10) + 5
-    
-    plan_prompt = f"""
-    使用者想要搜尋關於「{search_query}」的企業名單。
-    因為範圍很廣，請你幫我拆解出 {needed_queries} 個「具體且多樣化」的搜尋關鍵字，以便找出該領域上中下游的不同公司。
-    
-    請包含：
-    1. 具體的設備名稱 (例如：RO逆滲透、汙泥壓濾機)
-    2. 具體的服務類型 (例如：代操、環保工程、檢測)
-    3. 相關的供應鏈角色 (例如：製造商、代理商、經銷商)
-    4. 結合台灣主要工業區或地區 (例如：竹科 廢水處理、高雄 環保公司)
-
-    請直接回傳一個 JSON String Array，例如：
-    ["{search_query} 設備商", "{search_query} 工程公司", "特定技術 廠商"...]
-    
-    注意：只回傳 JSON Array，不要有 Markdown。
-    """
-    
+    # ✅ 關鍵修正：使用 'gemini-1.5-flash' 避免 404 錯誤
     try:
-        plan_res = model.generate_content(plan_prompt)
-        plan_text = plan_res.text.replace("```json", "").replace("```", "").strip()
-        search_keywords = json.loads(plan_text)
-        
-        status_box.write(f"✅ 策略規劃完成！AI 生成了 {len(search_keywords)} 組精準搜尋詞：")
-        status_box.json(search_keywords)
-        
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 測試連線
+        model.generate_content("test")
     except Exception as e:
-        status_box.warning(f"AI 規劃失敗，切換回預設策略: {e}")
-        search_keywords = [f"{search_query} {s}" for s in ["廠商", "公司", "供應商", "工程", "設備", "台北", "台中", "高雄"]]
+        st.error(f"❌ 模型連線失敗：{e}")
+        st.stop()
 
     # ==========================
-    # 階段一：依據 AI 策略進行搜尋
+    # 階段一：搜尋
     # ==========================
-    status_box.write("📡 開始執行多執行緒搜尋...")
+    status_box = st.status("🚀 啟動搜尋引擎...", expanded=True)
+    
+    # 產生多樣化關鍵字
+    suffixes = [
+        " 廠商", " 公司", " 供應商", " 工程", " 設備", 
+        " 聯繫方式", " 電話", " 企業名錄", " 推薦", " 解決方案",
+        " 台北", " 台中", " 高雄", " 台南", " 新竹", " 桃園",
+        " 環保工程", " 水處理", " 廢水代操", " 汙泥處理"
+    ]
+    # 組合關鍵字
+    search_keywords = [f"{search_query}{s}" for s in suffixes]
+    # 如果要抓 500 筆，就重複利用或增加更多
+    if target_limit > 200:
+        search_keywords *= 2
     
     raw_results = []
     seen_urls = set()
     progress_bar = st.progress(0)
     
-    # 迴圈抓取
     for i, query in enumerate(search_keywords):
         if len(raw_results) >= target_limit:
             break
-            
+        
         status_box.write(f"🔍 ({len(raw_results)}/{target_limit}) 正在搜尋：**{query}**")
         
         try:
             response = tavily.search(
                 query=query,
                 max_results=20, 
-                search_depth="advanced"
+                search_depth="advanced", # 必須使用 advanced 才能抓到內文
+                include_domains=[] 
             )
             
-            items_found = 0
             for item in response.get('results', []):
                 url = item.get('url')
                 if url and url not in seen_urls:
-                    raw_results.append(item) 
+                    raw_results.append(item)
                     seen_urls.add(url)
-                    items_found += 1
             
-            time.sleep(0.5) 
+            time.sleep(0.5)
             
-        except Exception:
+        except Exception as e:
+            print(f"Search error: {e}")
             continue
             
-        search_progress = min(len(raw_results) / target_limit, 1.0) * 0.7
-        progress_bar.progress(search_progress)
+        progress_bar.progress(min(len(raw_results) / target_limit, 1.0) * 0.7)
 
     final_raw_data = raw_results[:target_limit]
-    status_box.write(f"✅ 搜尋完成！共取得 {len(final_raw_data)} 筆資料。開始 AI 欄位萃取...")
+    status_box.write(f"✅ 搜尋完成！取得 {len(final_raw_data)} 筆資料。開始 AI 智能萃取...")
 
     # ==========================
-    # 階段二：Gemini 整理欄位
+    # 階段二：AI 萃取 (加強版)
     # ==========================
     parsed_data = []
-    batch_size = 15 
+    batch_size = 10 # 縮小批次大小，提高 AI 成功率
     
     if len(final_raw_data) > 0:
         total_batches = (len(final_raw_data) + batch_size - 1) // batch_size
@@ -138,62 +137,74 @@ if start_btn:
         for i in range(0, len(final_raw_data), batch_size):
             batch = final_raw_data[i:i+batch_size]
             
-            current_batch_idx = i // batch_size
-            prog = 0.7 + 0.3 * (current_batch_idx / total_batches)
+            prog = 0.7 + 0.3 * ((i // batch_size) / total_batches)
             progress_bar.progress(min(prog, 0.99))
             
             try:
-                batch_json = json.dumps(batch, ensure_ascii=False)
+                # 簡化 JSON，只留給 AI 需要的欄位，減少 token 消耗與混淆
+                mini_batch = [{"title": d['title'], "url": d['url'], "content": d.get('content', '')[:1000]} for d in batch]
+                batch_json = json.dumps(mini_batch, ensure_ascii=False)
                 
+                # ✅ 強化提示詞 (Prompt Engineering)
                 prompt = f"""
-                請從 JSON 資料中提取公司聯絡資訊。
-                輸出 JSON Array，包含：
-                1. "公司名稱"
-                2. "Email" (無則空)
-                3. "傳真" (無則空)
-                4. "電話" (無則空)
-                5. "網址" (使用 url)
+                你是資料處理專家。請從下方 JSON 資料中，精準提取每家公司的聯絡資訊。
+                
+                目標欄位：
+                1. "公司名稱" (請從標題或內文分析出最乾淨的公司全名，去除 '首頁'、'有限公司' 後面的贅字)
+                2. "Email" (尋找 @ 符號的信箱，若無則留空)
+                3. "電話" (尋找手機或市話格式，若無則留空)
+                4. "傳真" (若無則留空)
+                5. "網址" (直接回填 url)
 
                 原始資料:
                 {batch_json}
+                
+                請直接回傳 JSON Array，格式範例：
+                [{{"公司名稱": "某某科技", "Email": "abc@test.com", "電話": "02-12345678", "傳真": "", "網址": "..."}}]
+                嚴禁輸出 Markdown 標記 (不要有 ```json)。
                 """
                 
                 res = model.generate_content(prompt)
                 clean_json = res.text.replace("```json", "").replace("```", "").strip()
                 
-                try:
-                    batch_result = json.loads(clean_json)
-                    parsed_data.extend(batch_result)
-                except:
-                    for item in batch:
-                        parsed_data.append({"公司名稱": item.get('title'), "Email":"", "傳真":"", "電話":"", "網址": item.get('url')})
+                batch_result = json.loads(clean_json)
+                parsed_data.extend(batch_result)
                 
-            except:
+            except Exception as e:
+                # 如果這批失敗，至少保留標題網址，不要全空
                 for item in batch:
-                    parsed_data.append({"公司名稱": item.get('title'), "Email":"", "傳真":"", "電話":"", "網址": item.get('url')})
+                    parsed_data.append({
+                        "公司名稱": item.get('title'),
+                        "Email": "", "電話": "", "傳真": "", "網址": item.get('url')
+                    })
             
-            time.sleep(1.0) 
+            time.sleep(1.0)
 
     progress_bar.progress(1.0)
     status_box.update(label="🎉 處理完成！", state="complete", expanded=False)
 
     # ==========================
-    # 階段三：產出 Excel
+    # 階段三：產出
     # ==========================
     df = pd.DataFrame(parsed_data)
-    target_cols = ["公司名稱", "Email", "傳真", "網址", "電話"]
+    
+    # 確保欄位存在且順序正確
+    target_cols = ["公司名稱", "電話", "Email", "傳真", "網址"]
     for col in target_cols:
         if col not in df.columns: df[col] = ""
     df = df[target_cols]
 
-    st.subheader(f"檔案預覽 (共 {len(df)} 筆)")
+    # 去除完全空白的無效資料 (標題不算)
+    # 這裡可以加強：如果電話/Email都沒抓到，是否要標註？目前先保留原樣。
+    
+    st.subheader(f"預覽 (共 {len(df)} 筆)")
     st.dataframe(df.head(), use_container_width=True)
     
     csv = df.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
-        label=f"📥 下載 Excel 檔案 ({len(df)}筆資料.csv)",
+        label=f"📥 下載 Excel 檔案 ({len(df)}筆.csv)",
         data=csv,
-        file_name=f'{search_query}_名單.csv',
+        file_name=f'{search_query}_名單_修復版.csv',
         mime='text/csv',
         type="primary"
     )

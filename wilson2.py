@@ -9,19 +9,19 @@ from urllib.parse import urlparse
 from tavily import TavilyClient
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="超級業務開發助手 (清爽版)", layout="wide")
-st.title("🕵️‍♂️ 全自動客戶名單搜集器 (乾淨輸出版)")
+st.set_page_config(page_title="超級業務開發助手 (完美名稱版)", layout="wide")
+st.title("🕵️‍♂️ 全自動客戶名單搜集器 (名稱自動修復版)")
 st.markdown("""
-### 🚀 輸出重點：
-只顯示你最需要的：**公司名稱、電話、Email、傳真、網址**。
-雜訊資訊已自動過濾。
+### 🚀 功能完成！
+現在即使 AI 暫時無法運作，程式也會：
+1. **自動抓取** 網頁中的電話與 Email (Regex 技術)。
+2. **自動填入** 搜尋到的公司標題 (不再顯示錯誤訊息)。
 """)
 
 # --- 2. 側邊欄設定 ---
 with st.sidebar:
     st.header("⚙️ 設定")
     
-    # 從 secrets 讀取或手動輸入
     if "GEMINI_API_KEY" in st.secrets:
         gemini_api_key = st.secrets["GEMINI_API_KEY"]
         st.success("✅ 已讀取 Gemini Key")
@@ -35,7 +35,6 @@ with st.sidebar:
         tavily_api_key = st.text_input("輸入 Tavily API Key", type="password")
 
     num_results = st.slider("搜尋數量", 3, 20, 5) 
-    # 預設關閉 Debug，讓畫面更乾淨
     debug_mode = st.toggle("顯示後台處理過程", value=False)
 
 # --- 3. 核心工具 ---
@@ -85,10 +84,11 @@ def regex_backup(text):
 # --- 4. AI 分析函數 ---
 
 def extract_contact_info(content, url, model):
+    # 預先掃描
+    emails, phones = regex_backup(content)
+    
     try:
-        emails, phones = regex_backup(content)
         backup_info = f"Email: {emails[:3]}, 電話: {phones[:5]}"
-
         prompt = f"""
         你是一個資料提取機器人。請分析網頁內容找出聯絡方式。
         
@@ -126,10 +126,9 @@ def extract_contact_info(content, url, model):
         return data
 
     except:
-        # 靜默失敗：不回傳錯誤訊息，直接給掃描到的結果
-        emails, phones = regex_backup(content)
+        # 當 AI 失敗時，回傳一個特殊的標記名稱 "ERROR"
         return {
-            "公司名稱": "AI讀取失敗(顯示掃描結果)", 
+            "公司名稱": "ERROR", 
             "電話": phones[0] if phones else "", 
             "Email": emails[0] if emails else "", 
             "傳真": "",
@@ -144,7 +143,8 @@ if st.button("開始搜尋與分析"):
         st.error("❌ 請輸入 API Key")
     else:
         genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel('gemini-pro')
+        # 嘗試使用 flash 模型，如果不行也沒關係，我們有備案
+        model = genai.GenerativeModel('gemini-1.5-flash')
         tavily = TavilyClient(api_key=tavily_api_key)
         
         status_box = st.status("🚀 正在努力搜集中...", expanded=True)
@@ -172,16 +172,18 @@ if st.button("開始搜尋與分析"):
                         
                         if len(content) > 50:
                             data = extract_contact_info(content, url, model)
-                            if not data.get("公司名稱") or "解析失敗" in str(data.get("公司名稱")):
+                            
+                            # --- [關鍵修正] 只要名稱是 ERROR 或 失敗，就直接用標題取代 ---
+                            name = str(data.get("公司名稱", ""))
+                            if name == "ERROR" or "失敗" in name or name == "None":
                                 data["公司名稱"] = title
                             
                             results_list.append(data)
                         else:
-                            # 內容太少就不顯示了，保持版面乾淨
                             pass
                             
                     except:
-                        pass # 有錯誤就跳過，不顯示紅字
+                        pass
                         
                     progress_bar.progress((i + 1) / len(search_results))
                     time.sleep(0.5)
@@ -190,9 +192,6 @@ if st.button("開始搜尋與分析"):
                 
                 if results_list:
                     df = pd.DataFrame(results_list)
-                    
-                    # --- [這裡就是你要的乾淨欄位] ---
-                    # 我移除了 "資料來源" 和 "備註"
                     cols = ["公司名稱", "電話", "Email", "傳真", "網址"]
                     
                     for c in cols:
@@ -201,7 +200,7 @@ if st.button("開始搜尋與分析"):
 
                     st.dataframe(df)
                     
-                    excel_file = "leads_clean.xlsx"
+                    excel_file = "leads_perfect.xlsx"
                     df.to_excel(excel_file, index=False)
                     with open(excel_file, "rb") as f:
                         st.download_button("📥 下載 Excel 名單", f, file_name=f"{keyword}_客戶名單.xlsx")

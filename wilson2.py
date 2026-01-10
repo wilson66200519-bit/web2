@@ -6,23 +6,32 @@ import time
 import json
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="超級名單搜集器 (AI裂變版)", layout="wide")
-st.title("📊 企業名單自動搜集 (AI 關鍵字裂變版)")
-st.markdown("專門解決「範圍太廣」的問題：AI 會自動將大關鍵字拆解成數十個精準搜尋詞，確保資料多樣性。")
+st.set_page_config(page_title="超級名單搜集器 (Secrets版)", layout="wide")
+st.title("📊 企業名單自動搜集 (已串接 Secrets)")
+st.markdown("專門解決「範圍太廣」的問題：AI 會自動將大關鍵字拆解成數十個精準搜尋詞。")
 
-# --- 2. 側邊欄參數 ---
+# --- 2. 讀取 Secrets ---
+# 嘗試從 Streamlit Secrets 讀取金鑰
+try:
+    tavily_api_key = st.secrets["TAVILY_API_KEY"]
+    gemini_api_key = st.secrets["GEMINI_API_KEY"]
+    st.success("✅ 已成功從 Secrets 載入 API Keys")
+except FileNotFoundError:
+    st.error("❌ 找不到 secrets.toml 文件，請確認是否已建立 .streamlit/secrets.toml")
+    st.stop()
+except KeyError as e:
+    st.error(f"❌ Secrets 設定檔中缺少變數：{e}，請確認變數名稱是否為 TAVILY_API_KEY 與 GEMINI_API_KEY")
+    st.stop()
+
+# --- 3. 側邊欄參數 ---
 with st.sidebar:
-    st.header("⚙️ API 設定")
-    tavily_api_key = st.text_input("Tavily API Key", type="password")
-    gemini_api_key = st.text_input("Gemini API Key", type="password")
-    
-    st.divider()
+    st.header("⚙️ 搜尋設定")
     
     # 範圍 100 - 500
     target_limit = st.slider("🎯 目標資料筆數", min_value=100, max_value=500, value=100, step=50)
-    st.info("💡 提示：設定越高，AI 生成的搜尋策略會越詳細。")
+    st.info(f"設定 {target_limit} 筆時，AI 將會自動規劃約 {int(target_limit/10)+5} 組不同的關鍵字進行地毯式搜索。")
 
-# --- 3. 主畫面 ---
+# --- 4. 主畫面 ---
 col1, col2 = st.columns([3, 1])
 with col1:
     search_query = st.text_input("搜尋關鍵字 (例如：建築業、食品業、廢水處理)", value="廢水回收系統")
@@ -31,22 +40,20 @@ with col2:
     st.write(" ")
     start_btn = st.button("🚀 AI 規劃並執行", type="primary", use_container_width=True)
 
-# --- 4. 執行邏輯 ---
+# --- 5. 執行邏輯 ---
 if start_btn:
-    if not tavily_api_key or not gemini_api_key:
-        st.error("❌ 請輸入 API Key 才能執行！")
-        st.stop()
 
+    # 初始化 API
     tavily = TavilyClient(api_key=tavily_api_key)
     genai.configure(api_key=gemini_api_key)
     model = genai.GenerativeModel('gemini-1.5-pro')
 
     # ==========================
-    # 階段零：AI 關鍵字裂變 (新增功能)
+    # 階段零：AI 關鍵字裂變
     # ==========================
     status_box = st.status("🧠 AI 正在分析產業結構並規劃搜尋策略...", expanded=True)
     
-    # 計算需要多少個搜尋詞 (Tavily 一次約 10-15 筆有效，所以除以 10)
+    # 計算需要多少個搜尋詞
     needed_queries = int(target_limit / 10) + 5
     
     plan_prompt = f"""
@@ -71,11 +78,10 @@ if start_btn:
         search_keywords = json.loads(plan_text)
         
         status_box.write(f"✅ 策略規劃完成！AI 生成了 {len(search_keywords)} 組精準搜尋詞：")
-        status_box.json(search_keywords) # 顯示出來讓你知道 AI 多聰明
+        status_box.json(search_keywords)
         
     except Exception as e:
         status_box.warning(f"AI 規劃失敗，切換回預設策略: {e}")
-        # 備用方案
         search_keywords = [f"{search_query} {s}" for s in ["廠商", "公司", "供應商", "工程", "設備", "台北", "台中", "高雄"]]
 
     # ==========================
@@ -85,12 +91,10 @@ if start_btn:
     
     raw_results = []
     seen_urls = set()
-    
     progress_bar = st.progress(0)
     
-    # 迴圈抓取 (使用 AI 生成的關鍵字)
+    # 迴圈抓取
     for i, query in enumerate(search_keywords):
-        # 檢查是否達標
         if len(raw_results) >= target_limit:
             break
             
@@ -116,11 +120,9 @@ if start_btn:
         except Exception:
             continue
             
-        # 更新進度 (前 70% 給搜尋)
         search_progress = min(len(raw_results) / target_limit, 1.0) * 0.7
         progress_bar.progress(search_progress)
 
-    # 截斷多餘資料
     final_raw_data = raw_results[:target_limit]
     status_box.write(f"✅ 搜尋完成！共取得 {len(final_raw_data)} 筆資料。開始 AI 欄位萃取...")
 
@@ -136,7 +138,6 @@ if start_btn:
         for i in range(0, len(final_raw_data), batch_size):
             batch = final_raw_data[i:i+batch_size]
             
-            # 計算進度 (從 0.7 開始跑到 1.0)
             current_batch_idx = i // batch_size
             prog = 0.7 + 0.3 * (current_batch_idx / total_batches)
             progress_bar.progress(min(prog, 0.99))

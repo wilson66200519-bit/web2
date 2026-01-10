@@ -9,13 +9,13 @@ from urllib.parse import urljoin, urlparse
 from tavily import TavilyClient
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="超級業務開發助手 (地毯式搜索版)", layout="wide")
-st.title("🕵️‍♂️ 全自動客戶名單搜集器 (全來源搜刮+智慧分類)")
+st.set_page_config(page_title="超級業務開發助手 (全知全能版)", layout="wide")
+st.title("🕵️‍♂️ 全自動客戶名單搜集器 (深層挖掘+摘要分析)")
 st.markdown("""
-### 🚀 這次真的挖地三尺了：
-1. **傳真增強**：支援 `F:` `F.` `FAX` `傳真` `Facsimile` 等 10 種寫法。
-2. **預覽救援**：如果網頁裡找不到，程式會回頭去翻 **「搜尋引擎的摘要」**，往往 Email 就藏在那裡！
-3. **智慧分類**：維持電話與統編自動分離的功能。
+### 🚀 這是最終的強力版本：
+1. **擴大搜索範圍**：不僅找「聯絡我們」，還會找「服務據點」、「公司簡介」，把藏在深處的 Email 挖出來。
+2. **摘要分析**：強制 AI 閱讀搜尋引擎的預覽文字 (Snippet)，往往 Email 就藏在那裡。
+3. **智慧分類**：電話、統編、傳真 自動歸位。
 """)
 
 # --- 2. 側邊欄設定 ---
@@ -49,9 +49,17 @@ def get_root_url(url):
         return url
 
 def find_contact_link(markdown_text, root_url):
-    """ 尋找聯絡我們連結 """
+    """ 
+    尋找內頁連結 (擴充關鍵字版) 
+    針對傳產網頁，增加「據點」、「簡介」、「服務」等關鍵字
+    """
     links = re.findall(r'\[(.*?)\]\((.*?)\)', markdown_text)
-    keywords = ["聯絡", "contact", "about", "關於", "support", "inquiry", "詢價"]
+    
+    # [關鍵修改] 擴大關鍵字清單
+    keywords = [
+        "聯絡", "contact", "about", "關於", "support", "inquiry", "詢價", 
+        "服務", "service", "map", "location", "據點", "營業", "profile", "簡介"
+    ]
     
     for text, link in links:
         for kw in keywords:
@@ -74,18 +82,18 @@ def fetch_content_smart(url, fallback_content=""):
         resp = requests.get(jina_url, timeout=10)
         if resp.status_code == 200 and len(resp.text) > 200:
             homepage_text = resp.text
-            combined_content += f"\n=== 首頁 ===\n{homepage_text[:20000]}"
+            combined_content += f"\n=== 首頁內容 ===\n{homepage_text[:20000]}"
             source_log.append("首頁")
             
-            # 如果首頁看起來沒什麼聯絡資訊，嘗試找連結
-            if "@" not in homepage_text and "Fax" not in homepage_text:
+            # 如果首頁沒看到 Email，嘗試找內頁
+            if "@" not in homepage_text:
                 contact_link, link_text = find_contact_link(homepage_text, root_url)
                 if contact_link:
                     source_log.append(f"內頁({link_text})")
                     jina_contact_url = f"https://r.jina.ai/{contact_link}"
                     resp_inner = requests.get(jina_contact_url, timeout=10)
                     if resp_inner.status_code == 200:
-                        combined_content += f"\n=== 內頁 ===\n{resp_inner.text[:20000]}"
+                        combined_content += f"\n=== {link_text} ===\n{resp_inner.text[:20000]}"
         else:
             if len(fallback_content) > 50:
                 combined_content = fallback_content
@@ -99,7 +107,7 @@ def fetch_content_smart(url, fallback_content=""):
     return combined_content, " + ".join(source_log)
 
 def regex_heavy_duty(text):
-    """ 強力掃描 + 智慧分類 + 傳真增強 """
+    """ 強力掃描 + 智慧分類 """
     if not text: return [], [], [], []
     
     text_clean = " ".join(text.split())
@@ -109,11 +117,11 @@ def regex_heavy_duty(text):
     mailto_emails = re.findall(r'mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', text)
     all_emails = list(set(emails + mailto_emails))
 
-    # 2. 抓 傳真 (Fax) - 增強版規則
-    # 支援: Fax: 02-xxx, F: 02-xxx, T/F: 02-xxx, 傳真: 02-xxx
+    # 2. 抓 傳真 (Fax)
+    # 支援 Fax/Tel 這種混合寫法
     fax_patterns = [
-        r'(?:Fax|FAX|傳真|Facsimile)[\s:：\.]*(\(?0\d{1,2}\)?[\s\-]?[0-9-]{6,15})',
-        r'(?:F\.|F:)[\s]*(\(?0\d{1,2}\)?[\s\-]?[0-9-]{6,15})', # 針對 F. 02-xxxx
+        r'(?:Fax|FAX|傳真|Facsimile|F\.|F:)[\s:：\.]*(\(?0\d{1,2}\)?[\s\-]?[0-9-]{6,15})',
+        r'(?:Tel\/Fax|TEL\/FAX)[\s:：\.]*(\(?0\d{1,2}\)?[\s\-]?[0-9-]{6,15})'
     ]
     
     faxes = []
@@ -126,12 +134,12 @@ def regex_heavy_duty(text):
     raw_numbers = re.findall(r'(?:\(?0\d{1,2}\)?[\s\-]?)?\d{3,4}[\s\-]?\d{3,4}', text_clean)
     
     phones = []
-    tax_ids = [] # 統編
+    tax_ids = []
     
     for num in list(set(raw_numbers)):
-        clean_num = re.sub(r'\D', '', num) # 只留數字
+        clean_num = re.sub(r'\D', '', num)
         
-        # 過濾掉已經被當成傳真的號碼
+        # 過濾傳真
         is_fax = False
         for f in faxes:
             if clean_num in re.sub(r'\D', '', f):
@@ -153,21 +161,24 @@ def regex_heavy_duty(text):
 # --- 4. AI 分析函數 ---
 
 def extract_contact_info(content, url, model, snippet_content=""):
-    # 這裡很關鍵：我們把「搜尋引擎的摘要 (Snippet)」也加進去掃描！
-    # 因為有時候 Email 就直接寫在 Google 搜尋結果上，但網頁裡卻沒有
-    full_text_scan = content + "\n" + snippet_content
+    # [關鍵修改] 組合所有文本：網頁內容 + 搜尋摘要
+    # 讓 regex 也能掃描到摘要裡的 Email
+    full_scan_text = content + "\n=== 搜尋引擎摘要 ===\n" + snippet_content
     
-    emails, phones, faxes, tax_ids = regex_heavy_duty(full_text_scan)
+    emails, phones, faxes, tax_ids = regex_heavy_duty(full_scan_text)
     
     try:
         backup_info = f"Email: {emails[:3]}, 電話: {phones[:3]}, 傳真: {faxes[:2]}"
         prompt = f"""
-        你是一個資料提取機器人。請分析網頁內容找出聯絡方式。
+        你是一個資料提取機器人。請分析網頁內容與搜尋摘要，找出聯絡方式。
         
         網址：{url}
-        參考數據：{backup_info}
+        參考數據(Regex掃描)：{backup_info}
 
-        網頁內容：
+        【重要】搜尋引擎摘要 (Snippet)：
+        {snippet_content}
+
+        網頁內容摘要：
         {content[:40000]} 
         
         請回傳 JSON：
@@ -190,6 +201,7 @@ def extract_contact_info(content, url, model, snippet_content=""):
         data = json.loads(txt)
 
         # --- 強力回填機制 ---
+        # 如果 AI 沒填，就用 Regex 掃到的資料補 (包含從 Snippet 掃到的)
         if (not data.get("Email") or str(data.get("Email")).lower() in ["none", "", "null"]) and emails:
             data["Email"] = ", ".join(emails[:2])
             
@@ -227,7 +239,7 @@ if st.button("開始搜尋與分析"):
         model = genai.GenerativeModel('gemini-1.5-flash')
         tavily = TavilyClient(api_key=tavily_api_key)
         
-        status_box = st.status("🚀 啟動地毯式搜索...", expanded=True)
+        status_box = st.status("🚀 全知全能模式啟動...", expanded=True)
         results_list = []
         
         try:
@@ -244,8 +256,8 @@ if st.button("開始搜尋與分析"):
                     try:
                         url = item.get('url', '無網址')
                         title = item.get('title', '無標題')
-                        tavily_raw = item.get('raw_content') or "" # 這是網頁內文庫存
-                        tavily_snippet = item.get('content') or "" # 這是搜尋引擎上的摘要
+                        tavily_raw = item.get('raw_content') or ""
+                        tavily_snippet = item.get('content') or "" # 取得搜尋摘要
                         
                         status_box.write(f"({i+1}/{len(search_results)}) 分析：{title}")
                         
@@ -253,13 +265,12 @@ if st.button("開始搜尋與分析"):
                         
                         if debug_mode:
                             with st.expander(f"🔍 追蹤路徑: {source_log}"):
-                                # 這裡我們把摘要也加進去掃描
-                                emails, phones, faxes, taxes = regex_heavy_duty(content + "\n" + tavily_snippet)
-                                st.write(f"掃描結果 -> Email: {len(emails)}, 傳真: {len(faxes)}, 統編: {len(taxes)}")
+                                # 預覽一下有沒有抓到
+                                emails, _, _, _ = regex_heavy_duty(content + "\n" + tavily_snippet)
+                                st.write(f"目前掃描到的 Email 數量: {len(emails)}")
                         
-                        # 只要有任何內容，我們就試著分析
                         if len(content) > 50 or len(tavily_snippet) > 20:
-                            # 注意：我們把 tavily_snippet 也傳進去了
+                            # 傳入 snippet_content 給 AI 分析
                             data = extract_contact_info(content, url, model, snippet_content=tavily_snippet)
                             
                             name = str(data.get("公司名稱", ""))
@@ -288,10 +299,10 @@ if st.button("開始搜尋與分析"):
 
                     st.dataframe(df)
                     
-                    excel_file = "leads_complete.xlsx"
+                    excel_file = "leads_omniscient.xlsx"
                     df.to_excel(excel_file, index=False)
                     with open(excel_file, "rb") as f:
-                        st.download_button("📥 下載 Excel 名單", f, file_name=f"{keyword}_地毯式名單.xlsx")
+                        st.download_button("📥 下載 Excel 名單", f, file_name=f"{keyword}_全知名單.xlsx")
 
         except Exception as e:
             st.error(f"發生錯誤：{e}")

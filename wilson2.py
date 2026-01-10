@@ -1,310 +1,198 @@
 import streamlit as st
-import google.generativeai as genai
 import pandas as pd
-import json
-import time
-import requests
-import re
-from urllib.parse import urljoin, urlparse
 from tavily import TavilyClient
+import google.generativeai as genai
+import time
+import json
 
-# --- 1. 頁面設定 ---
-st.set_page_config(page_title="開發抓取小助手", layout="wide")
-st.title("🕵️‍♂️ 全自動客戶名單搜集器")
+# --- 1. 基礎設定 ---
+st.set_page_config(page_title="超級名單搜集器 (AI裂變版)", layout="wide")
+st.title("📊 企業名單自動搜集 (AI 關鍵字裂變版)")
+st.markdown("專門解決「範圍太廣」的問題：AI 會自動將大關鍵字拆解成數十個精準搜尋詞，確保資料多樣性。")
 
-# --- 2. 側邊欄設定 ---
+# --- 2. 側邊欄參數 ---
 with st.sidebar:
-    st.header("⚙️ 設定")
+    st.header("⚙️ API 設定")
+    tavily_api_key = st.text_input("Tavily API Key", type="password")
+    gemini_api_key = st.text_input("Gemini API Key", type="password")
     
-    if "GEMINI_API_KEY" in st.secrets:
-        gemini_api_key = st.secrets["GEMINI_API_KEY"]
-        st.success("✅ 已讀取 Gemini Key")
-    else:
-        gemini_api_key = st.text_input("輸入 Gemini API Key", type="password")
-
-    if "TAVILY_API_KEY" in st.secrets:
-        tavily_api_key = st.secrets["TAVILY_API_KEY"]
-        st.success("✅ 已讀取 Tavily Key")
-    else:
-        tavily_api_key = st.text_input("輸入 Tavily API Key", type="password")
-
-    num_results = st.slider("搜尋數量", 50, 1000, 5)
-    debug_mode = st.toggle("顯示後台處理過程", value=True)
-
-# --- 3. 核心工具 ---
-
-def get_root_url(url):
-    """ 強制轉回首頁 """
-    if not url: return ""
-    try:
-        parsed = urlparse(url)
-        return f"{parsed.scheme}://{parsed.netloc}"
-    except:
-        return url
-
-def find_contact_link(markdown_text, root_url):
-    """ 尋找內頁連結 """
-    links = re.findall(r'\[(.*?)\]\((.*?)\)', markdown_text)
-    keywords = [
-        "聯絡", "contact", "about", "關於", "support", "inquiry", "詢價", 
-        "服務", "service", "map", "location", "據點", "營業", "profile", "簡介"
-    ]
-    for text, link in links:
-        for kw in keywords:
-            if kw in text.lower():
-                full_link = urljoin(root_url, link)
-                return full_link, text
-    return None, None
-
-def fetch_content_smart(url, fallback_content=""):
-    """ 智慧抓取流程 """
-    if fallback_content is None: fallback_content = ""
-    combined_content = ""
-    source_log = []
-    root_url = get_root_url(url)
-    jina_url = f"https://r.jina.ai/{root_url}"
+    st.divider()
     
-    try:
-        resp = requests.get(jina_url, timeout=10)
-        if resp.status_code == 200 and len(resp.text) > 200:
-            homepage_text = resp.text
-            combined_content += f"\n=== 首頁內容 ===\n{homepage_text[:20000]}"
-            source_log.append("首頁")
-            if "@" not in homepage_text:
-                contact_link, link_text = find_contact_link(homepage_text, root_url)
-                if contact_link:
-                    source_log.append(f"內頁({link_text})")
-                    jina_contact_url = f"https://r.jina.ai/{contact_link}"
-                    resp_inner = requests.get(jina_contact_url, timeout=10)
-                    if resp_inner.status_code == 200:
-                        combined_content += f"\n=== {link_text} ===\n{resp_inner.text[:20000]}"
-        else:
-            if len(fallback_content) > 50:
-                combined_content = fallback_content
-                source_log.append("庫存")
-    except:
-        if len(fallback_content) > 50:
-            combined_content = fallback_content
-            source_log.append("庫存(救援)")
+    # 範圍 100 - 500
+    target_limit = st.slider("🎯 目標資料筆數", min_value=100, max_value=500, value=100, step=50)
+    st.info("💡 提示：設定越高，AI 生成的搜尋策略會越詳細。")
 
-    return combined_content, " + ".join(source_log)
+# --- 3. 主畫面 ---
+col1, col2 = st.columns([3, 1])
+with col1:
+    search_query = st.text_input("搜尋關鍵字 (例如：建築業、食品業、廢水處理)", value="廢水回收系統")
+with col2:
+    st.write(" ") 
+    st.write(" ")
+    start_btn = st.button("🚀 AI 規劃並執行", type="primary", use_container_width=True)
 
-def regex_heavy_duty(text):
-    """ 強力掃描 + 智慧分類 """
-    if not text: return [], [], [], []
-    text_clean = " ".join(text.split())
+# --- 4. 執行邏輯 ---
+if start_btn:
+    if not tavily_api_key or not gemini_api_key:
+        st.error("❌ 請輸入 API Key 才能執行！")
+        st.stop()
+
+    tavily = TavilyClient(api_key=tavily_api_key)
+    genai.configure(api_key=gemini_api_key)
+    model = genai.GenerativeModel('gemini-1.5-pro')
+
+    # ==========================
+    # 階段零：AI 關鍵字裂變 (新增功能)
+    # ==========================
+    status_box = st.status("🧠 AI 正在分析產業結構並規劃搜尋策略...", expanded=True)
     
-    # Email
-    emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text_clean)
-    mailto_emails = re.findall(r'mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', text)
-    all_emails = list(set(emails + mailto_emails))
-
-    # Fax
-    fax_patterns = [
-        r'(?:Fax|FAX|傳真|Facsimile|F\.|F:)[\s:：\.]*(\(?0\d{1,2}\)?[\s\-]?[0-9-]{6,15})',
-        r'(?:Tel\/Fax|TEL\/FAX)[\s:：\.]*(\(?0\d{1,2}\)?[\s\-]?[0-9-]{6,15})'
-    ]
-    faxes = []
-    for pattern in fax_patterns:
-        found = re.findall(pattern, text)
-        faxes.extend(found)
-    faxes = list(set(faxes))
+    # 計算需要多少個搜尋詞 (Tavily 一次約 10-15 筆有效，所以除以 10)
+    needed_queries = int(target_limit / 10) + 5
     
-    # Phone / Tax ID
-    raw_numbers = re.findall(r'(?:\(?0\d{1,2}\)?[\s\-]?)?\d{3,4}[\s\-]?\d{3,4}', text_clean)
-    phones = []
-    tax_ids = []
-    for num in list(set(raw_numbers)):
-        clean_num = re.sub(r'\D', '', num)
-        is_fax = False
-        for f in faxes:
-            if clean_num in re.sub(r'\D', '', f):
-                is_fax = True; break
-        if is_fax: continue
+    plan_prompt = f"""
+    使用者想要搜尋關於「{search_query}」的企業名單。
+    因為範圍很廣，請你幫我拆解出 {needed_queries} 個「具體且多樣化」的搜尋關鍵字，以便找出該領域上中下游的不同公司。
+    
+    請包含：
+    1. 具體的設備名稱 (例如：RO逆滲透、汙泥壓濾機)
+    2. 具體的服務類型 (例如：代操、環保工程、檢測)
+    3. 相關的供應鏈角色 (例如：製造商、代理商、經銷商)
+    4. 結合台灣主要工業區或地區 (例如：竹科 廢水處理、高雄 環保公司)
 
-        if len(clean_num) >= 8:
-            if clean_num.startswith('0'): phones.append(num)
-            elif len(clean_num) == 8: tax_ids.append(clean_num)
-            else: phones.append(num)
-
-    return all_emails, phones, faxes, tax_ids
-
-# --- 4. 補刀搜尋功能 (Hunter Mode - 全面版) ---
-def hunter_search(company_name, tavily_client):
-    """ 
-    當缺資料時，專門針對該公司進行全方位搜尋 
-    搜尋關鍵字包含：電話、傳真、Email、聯絡方式
+    請直接回傳一個 JSON String Array，例如：
+    ["{search_query} 設備商", "{search_query} 工程公司", "特定技術 廠商"...]
+    
+    注意：只回傳 JSON Array，不要有 Markdown。
     """
-    if not company_name or company_name == "Unknown": return ""
-    
-    # 擴充搜尋關鍵字
-    query = f"{company_name} 電話 傳真 email 聯絡方式 contact"
-    try:
-        resp = tavily_client.search(query=query, max_results=3)
-        snippets = ""
-        for res in resp.get('results', []):
-            snippets += res.get('content', '') + "\n"
-        return snippets
-    except:
-        return ""
-
-# --- 5. AI 分析函數 ---
-
-def extract_contact_info(content, url, model, snippet_content="", company_name_hint=""):
-    full_scan_text = content + "\n=== 搜尋摘要 ===\n" + snippet_content
-    emails, phones, faxes, tax_ids = regex_heavy_duty(full_scan_text)
     
     try:
-        backup_info = f"Email: {emails[:3]}, 電話: {phones[:3]}, 傳真: {faxes[:2]}"
-        prompt = f"""
-        你是一個資料提取機器人。請找出聯絡方式。
-        目標公司：{company_name_hint}
+        plan_res = model.generate_content(plan_prompt)
+        plan_text = plan_res.text.replace("```json", "").replace("```", "").strip()
+        search_keywords = json.loads(plan_text)
         
-        網址：{url}
-        參考數據：{backup_info}
+        status_box.write(f"✅ 策略規劃完成！AI 生成了 {len(search_keywords)} 組精準搜尋詞：")
+        status_box.json(search_keywords) # 顯示出來讓你知道 AI 多聰明
         
-        網頁內容與摘要：
-        {content[:30000]} 
-        {snippet_content}
-        
-        請回傳 JSON：
-        {{
-            "公司名稱": "...", 
-            "電話": "...", 
-            "Email": "...",
-            "傳真": "...",
-            "網址": "{url}"
-        }}
-        """
-        response = model.generate_content(prompt)
-        txt = response.text.strip()
-        if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
-        elif "```" in txt: txt = txt.split("```")[0]
-        data = json.loads(txt)
+    except Exception as e:
+        status_box.warning(f"AI 規劃失敗，切換回預設策略: {e}")
+        # 備用方案
+        search_keywords = [f"{search_query} {s}" for s in ["廠商", "公司", "供應商", "工程", "設備", "台北", "台中", "高雄"]]
 
-        # 強力回填 (第一階段)
-        if (not data.get("Email") or str(data.get("Email")).lower() in ["none", "", "null"]) and emails:
-            data["Email"] = ", ".join(emails[:2])
-        if (not data.get("電話") or str(data.get("電話")).lower() in ["none", "", "null"]) and phones:
-            data["電話"] = ", ".join(phones[:2])
-        if (not data.get("傳真") or str(data.get("傳真")).lower() in ["none", "", "null"]) and faxes:
-            data["傳真"] = faxes[0]
-        if tax_ids:
-            data["統編"] = ", ".join(tax_ids[:1])
-        else:
-            data["統編"] = ""
-
-        return data
-    except:
-        return {
-            "公司名稱": "ERROR", 
-            "電話": ", ".join(phones[:2]), 
-            "Email": ", ".join(emails[:2]), 
-            "傳真": faxes[0] if faxes else "",
-            "統編": ", ".join(tax_ids[:1]),
-            "網址": url
-        }
-
-# --- 6. 主程式 ---
-keyword = st.text_input("🔍 請輸入搜尋關鍵字", value="廢水回收系統 公司")
-
-if st.button("開始搜尋與分析"):
-    if not gemini_api_key or not tavily_api_key:
-        st.error("❌ 請輸入 API Key")
-    else:
-        genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        tavily = TavilyClient(api_key=tavily_api_key)
-        
-        status_box = st.status("🚀 啟動全面追殺模式...", expanded=True)
-        results_list = []
+    # ==========================
+    # 階段一：依據 AI 策略進行搜尋
+    # ==========================
+    status_box.write("📡 開始執行多執行緒搜尋...")
+    
+    raw_results = []
+    seen_urls = set()
+    
+    progress_bar = st.progress(0)
+    
+    # 迴圈抓取 (使用 AI 生成的關鍵字)
+    for i, query in enumerate(search_keywords):
+        # 檢查是否達標
+        if len(raw_results) >= target_limit:
+            break
+            
+        status_box.write(f"🔍 ({len(raw_results)}/{target_limit}) 正在搜尋：**{query}**")
         
         try:
-            status_box.write(f"正在搜尋：{keyword}...")
-            response = tavily.search(query=keyword, max_results=num_results, include_raw_content=True)
-            search_results = response.get('results', [])
+            response = tavily.search(
+                query=query,
+                max_results=20, 
+                search_depth="advanced"
+            )
             
-            if not search_results:
-                status_box.error("找不到網址")
-            else:
-                progress_bar = st.progress(0)
+            items_found = 0
+            for item in response.get('results', []):
+                url = item.get('url')
+                if url and url not in seen_urls:
+                    raw_results.append(item) 
+                    seen_urls.add(url)
+                    items_found += 1
+            
+            time.sleep(0.5) 
+            
+        except Exception:
+            continue
+            
+        # 更新進度 (前 70% 給搜尋)
+        search_progress = min(len(raw_results) / target_limit, 1.0) * 0.7
+        progress_bar.progress(search_progress)
+
+    # 截斷多餘資料
+    final_raw_data = raw_results[:target_limit]
+    status_box.write(f"✅ 搜尋完成！共取得 {len(final_raw_data)} 筆資料。開始 AI 欄位萃取...")
+
+    # ==========================
+    # 階段二：Gemini 整理欄位
+    # ==========================
+    parsed_data = []
+    batch_size = 15 
+    
+    if len(final_raw_data) > 0:
+        total_batches = (len(final_raw_data) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(final_raw_data), batch_size):
+            batch = final_raw_data[i:i+batch_size]
+            
+            # 計算進度 (從 0.7 開始跑到 1.0)
+            current_batch_idx = i // batch_size
+            prog = 0.7 + 0.3 * (current_batch_idx / total_batches)
+            progress_bar.progress(min(prog, 0.99))
+            
+            try:
+                batch_json = json.dumps(batch, ensure_ascii=False)
                 
-                for i, item in enumerate(search_results):
-                    try:
-                        url = item.get('url', '無網址')
-                        title = item.get('title', '無標題')
-                        tavily_raw = item.get('raw_content') or ""
-                        tavily_snippet = item.get('content') or ""
-                        
-                        status_box.write(f"({i+1}/{len(search_results)}) 分析：{title}")
-                        
-                        # 1. 正常爬取
-                        content, source_log = fetch_content_smart(url, fallback_content=tavily_raw)
-                        data = extract_contact_info(content, url, model, snippet_content=tavily_snippet, company_name_hint=title)
-                        
-                        # 修復公司名稱
-                        name = str(data.get("公司名稱", ""))
-                        if name in ["ERROR", "None"] or "失敗" in name:
-                            name = title
-                            data["公司名稱"] = title
+                prompt = f"""
+                請從 JSON 資料中提取公司聯絡資訊。
+                輸出 JSON Array，包含：
+                1. "公司名稱"
+                2. "Email" (無則空)
+                3. "傳真" (無則空)
+                4. "電話" (無則空)
+                5. "網址" (使用 url)
 
-                        # 2. [全面補刀] 檢查所有關鍵欄位
-                        missing_email = not data.get("Email") or str(data.get("Email")).lower() in ["none", "", "null"]
-                        missing_phone = not data.get("電話") or str(data.get("電話")).lower() in ["none", "", "null"]
-                        missing_fax = not data.get("傳真") or str(data.get("傳真")).lower() in ["none", "", "null"]
-
-                        # 只要有缺，就發動搜尋
-                        if missing_email or missing_phone or missing_fax:
-                            missing_list = []
-                            if missing_email: missing_list.append("Email")
-                            if missing_phone: missing_list.append("電話")
-                            if missing_fax: missing_list.append("傳真")
-                            
-                            if debug_mode: status_box.write(f"⚠️ {title} 缺少 {', '.join(missing_list)}，發動全面補刀...")
-                            
-                            # 補刀搜尋：一次問所有資訊
-                            hunter_snippet = hunter_search(name, tavily)
-                            
-                            # 從補刀結果抓資料
-                            new_emails, new_phones, new_faxes, new_tax_ids = regex_heavy_duty(hunter_snippet)
-                            
-                            # 回填資料 (只填本來空的)
-                            if missing_email and new_emails:
-                                data["Email"] = ", ".join(new_emails[:2])
-                            if missing_phone and new_phones:
-                                data["電話"] = ", ".join(new_phones[:2])
-                            if missing_fax and new_faxes:
-                                data["傳真"] = new_faxes[0]
-                            # 統編也順便補一下
-                            if not data.get("統編") and new_tax_ids:
-                                data["統編"] = ", ".join(new_tax_ids[:1])
-
-                            data["備註"] = "經補刀搜尋"
-
-                        results_list.append(data)
-                            
-                    except Exception as e:
-                        if debug_mode: st.warning(f"處理 {title} 時發生錯誤: {e}")
-                        pass
-                        
-                    progress_bar.progress((i + 1) / len(search_results))
-                    time.sleep(1)
-
-                status_box.update(label="🎉 搜集完成！", state="complete", expanded=False)
+                原始資料:
+                {batch_json}
+                """
                 
-                if results_list:
-                    df = pd.DataFrame(results_list)
-                    cols = ["公司名稱", "統編", "電話", "Email", "傳真", "網址", "備註"]
-                    
-                    for c in cols:
-                        if c not in df.columns: df[c] = ""
-                    df = df[cols]
+                res = model.generate_content(prompt)
+                clean_json = res.text.replace("```json", "").replace("```", "").strip()
+                
+                try:
+                    batch_result = json.loads(clean_json)
+                    parsed_data.extend(batch_result)
+                except:
+                    for item in batch:
+                        parsed_data.append({"公司名稱": item.get('title'), "Email":"", "傳真":"", "電話":"", "網址": item.get('url')})
+                
+            except:
+                for item in batch:
+                    parsed_data.append({"公司名稱": item.get('title'), "Email":"", "傳真":"", "電話":"", "網址": item.get('url')})
+            
+            time.sleep(1.0) 
 
-                    st.dataframe(df)
-                    excel_file = "leads_total_recall.xlsx"
-                    df.to_excel(excel_file, index=False)
-                    with open(excel_file, "rb") as f:
-                        st.download_button("📥 下載 Excel 名單", f, file_name=f"{keyword}_全補完名單.xlsx")
+    progress_bar.progress(1.0)
+    status_box.update(label="🎉 處理完成！", state="complete", expanded=False)
 
-        except Exception as e:
-            st.error(f"發生錯誤：{e}")
+    # ==========================
+    # 階段三：產出 Excel
+    # ==========================
+    df = pd.DataFrame(parsed_data)
+    target_cols = ["公司名稱", "Email", "傳真", "網址", "電話"]
+    for col in target_cols:
+        if col not in df.columns: df[col] = ""
+    df = df[target_cols]
+
+    st.subheader(f"檔案預覽 (共 {len(df)} 筆)")
+    st.dataframe(df.head(), use_container_width=True)
+    
+    csv = df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label=f"📥 下載 Excel 檔案 ({len(df)}筆資料.csv)",
+        data=csv,
+        file_name=f'{search_query}_名單.csv',
+        mime='text/csv',
+        type="primary"
+    )

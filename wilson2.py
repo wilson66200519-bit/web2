@@ -89,7 +89,7 @@ if st.button("開始搜尋與分析"):
         try:
             with DDGS() as ddgs:
                 # region='tw-tzh' 代表搜尋台灣地區
-                ddgs_gen = ddgs.text(keyword, region='tw-tzh', max_results=num_results)
+                ddgs_gen = ddgs.text(keyword, max_results=num_results, backend="html")
                 for r in ddgs_gen:
                     search_urls.append(r['href'])
             

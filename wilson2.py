@@ -21,8 +21,8 @@ st.markdown("""
 # --- 2. 側邊欄設定 ---
 with st.sidebar:
     st.header("⚙️ 設定")
-    gemini_api_key = st.text_input("輸入 Gemini API Key", type="password")
-    tavily_api_key = st.text_input("輸入 Tavily API Key", type="password")
+    gemini_api_key = st.text_input("輸入 Gemini API Key", type="password", value="AIzaSyBdCdsWy8slsyC2XKzkfUWANh94Y96y5XU")
+    tavily_api_key = st.text_input("輸入 Tavily API Key", type="password", value="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")
     num_results = st.slider("搜尋數量", 3, 20, 5) 
     debug_mode = st.toggle("顯示除錯訊息 (Debug)", value=True)
 

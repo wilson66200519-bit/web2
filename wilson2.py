@@ -28,7 +28,7 @@ with st.sidebar:
     else:
         tavily_api_key = st.text_input("輸入 Tavily API Key", type="password")
 
-    num_results = st.slider("搜尋數量", 3, 20, 5) 
+    num_results = st.slider("搜尋數量", 50, 1000, 5)
     debug_mode = st.toggle("顯示後台處理過程", value=True)
 
 # --- 3. 核心工具 ---

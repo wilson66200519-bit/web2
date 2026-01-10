@@ -9,14 +9,13 @@ from urllib.parse import urljoin, urlparse
 from tavily import TavilyClient
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="超級業務開發助手 (死纏爛打版)", layout="wide")
-st.title("🕵️‍♂️ 全自動客戶名單搜集器 (二次追殺補完版)")
+st.set_page_config(page_title="超級業務開發助手 (全面追殺版)", layout="wide")
+st.title("🕵️‍♂️ 全自動客戶名單搜集器 (全欄位補完版)")
 st.markdown("""
-### 🚀 既然不滿意，我們就追到底：
-這個版本加入了 **「二次追殺 (Double-Tap)」** 機制。
-如果第一次爬完官網發現 **沒有 Email**，程式會自動發起第二次精確搜尋：
-`"{公司名} email 聯絡"`
-直接從網路上把它的 Email 逼出來！
+### 🚀 既然要補，就全部補齊：
+這個版本升級了「二次追殺」機制：
+只要 **電話、Email、傳真** 其中任何一個有缺，程式就會發動搜尋。
+一次把所有聯絡資訊都挖出來填滿！
 """)
 
 # --- 2. 側邊欄設定 ---
@@ -136,15 +135,17 @@ def regex_heavy_duty(text):
 
     return all_emails, phones, faxes, tax_ids
 
-# --- 4. 補刀搜尋功能 (Hunter Mode) ---
+# --- 4. 補刀搜尋功能 (Hunter Mode - 全面版) ---
 def hunter_search(company_name, tavily_client):
-    """ 當缺資料時，專門針對該公司進行精確搜尋 """
+    """ 
+    當缺資料時，專門針對該公司進行全方位搜尋 
+    搜尋關鍵字包含：電話、傳真、Email、聯絡方式
+    """
     if not company_name or company_name == "Unknown": return ""
     
-    # 搜尋策略：公司名 + email
-    query = f"{company_name} email 聯絡方式 contact"
+    # 擴充搜尋關鍵字
+    query = f"{company_name} 電話 傳真 email 聯絡方式 contact"
     try:
-        # 只抓前 3 筆結果的摘要就好，不用進去爬
         resp = tavily_client.search(query=query, max_results=3)
         snippets = ""
         for res in resp.get('results', []):
@@ -187,7 +188,7 @@ def extract_contact_info(content, url, model, snippet_content="", company_name_h
         elif "```" in txt: txt = txt.split("```")[0]
         data = json.loads(txt)
 
-        # 強力回填
+        # 強力回填 (第一階段)
         if (not data.get("Email") or str(data.get("Email")).lower() in ["none", "", "null"]) and emails:
             data["Email"] = ", ".join(emails[:2])
         if (not data.get("電話") or str(data.get("電話")).lower() in ["none", "", "null"]) and phones:
@@ -221,7 +222,7 @@ if st.button("開始搜尋與分析"):
         model = genai.GenerativeModel('gemini-1.5-flash')
         tavily = TavilyClient(api_key=tavily_api_key)
         
-        status_box = st.status("🚀 啟動死纏爛打模式...", expanded=True)
+        status_box = st.status("🚀 啟動全面追殺模式...", expanded=True)
         results_list = []
         
         try:
@@ -253,22 +254,39 @@ if st.button("開始搜尋與分析"):
                             name = title
                             data["公司名稱"] = title
 
-                        # 2. [關鍵補刀] 如果 Email 還是空的，發動二次搜尋
-                        current_email = str(data.get("Email", ""))
-                        if not current_email or current_email.lower() in ["none", "", "null"]:
-                            if debug_mode: status_box.write(f"⚠️ {title} 沒抓到 Email，發動補刀搜尋...")
+                        # 2. [全面補刀] 檢查所有關鍵欄位
+                        missing_email = not data.get("Email") or str(data.get("Email")).lower() in ["none", "", "null"]
+                        missing_phone = not data.get("電話") or str(data.get("電話")).lower() in ["none", "", "null"]
+                        missing_fax = not data.get("傳真") or str(data.get("傳真")).lower() in ["none", "", "null"]
+
+                        # 只要有缺，就發動搜尋
+                        if missing_email or missing_phone or missing_fax:
+                            missing_list = []
+                            if missing_email: missing_list.append("Email")
+                            if missing_phone: missing_list.append("電話")
+                            if missing_fax: missing_list.append("傳真")
                             
-                            # 補刀搜尋 (Targeted Search)
+                            if debug_mode: status_box.write(f"⚠️ {title} 缺少 {', '.join(missing_list)}，發動全面補刀...")
+                            
+                            # 補刀搜尋：一次問所有資訊
                             hunter_snippet = hunter_search(name, tavily)
                             
-                            # 再次用 Regex 從補刀結果抓資料
-                            new_emails, _, _, _ = regex_heavy_duty(hunter_snippet)
+                            # 從補刀結果抓資料
+                            new_emails, new_phones, new_faxes, new_tax_ids = regex_heavy_duty(hunter_snippet)
                             
-                            if new_emails:
+                            # 回填資料 (只填本來空的)
+                            if missing_email and new_emails:
                                 data["Email"] = ", ".join(new_emails[:2])
-                                data["備註"] = "二次補刀成功" # 讓你看到效果
-                                if debug_mode: status_box.write(f"✅ 補刀成功！抓到: {new_emails[0]}")
-                        
+                            if missing_phone and new_phones:
+                                data["電話"] = ", ".join(new_phones[:2])
+                            if missing_fax and new_faxes:
+                                data["傳真"] = new_faxes[0]
+                            # 統編也順便補一下
+                            if not data.get("統編") and new_tax_ids:
+                                data["統編"] = ", ".join(new_tax_ids[:1])
+
+                            data["備註"] = "經補刀搜尋"
+
                         results_list.append(data)
                             
                     except Exception as e:
@@ -289,10 +307,10 @@ if st.button("開始搜尋與分析"):
                     df = df[cols]
 
                     st.dataframe(df)
-                    excel_file = "leads_hunter.xlsx"
+                    excel_file = "leads_total_recall.xlsx"
                     df.to_excel(excel_file, index=False)
                     with open(excel_file, "rb") as f:
-                        st.download_button("📥 下載 Excel 名單", f, file_name=f"{keyword}_死纏爛打版.xlsx")
+                        st.download_button("📥 下載 Excel 名單", f, file_name=f"{keyword}_全補完名單.xlsx")
 
         except Exception as e:
             st.error(f"發生錯誤：{e}")

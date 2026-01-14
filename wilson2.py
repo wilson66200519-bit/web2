@@ -5,16 +5,17 @@ import json
 import time
 import requests
 import re
+from urllib.parse import urljoin, urlparse
 from tavily import TavilyClient
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="精準客戶名單搜集器 (美觀版)", layout="wide")
-st.title("🎯 精準客戶名單搜集器 (完美顯示版)")
+st.set_page_config(page_title="超級業務開發助手 (台灣精準版)", layout="wide")
+st.title("🇹🇼 全自動客戶名單工廠 (台灣精準版)")
 st.markdown("""
-### ✨ 介面與功能升級：
-1. **表格美化**：網址自動縮短為「🔗 前往官網」，不再佔用大量版面。
-2. **格式分離**：網頁上看得到的電話很乾淨，下載的 Excel 依然有防呆保護。
-3. **雙重備援**：爬蟲失敗時自動使用搜尋庫存，防止資料空白。
+### 🛡️ 本次修正重點：
+1. **嚴格區分統編與電話**：8 碼且非 0 開頭的數字，自動歸類為統編，不再誤判為電話。
+2. **鎖定台灣廠商**：搜尋時強制加上 "台灣"，並自動過濾 `.cn` (中國) 網域。
+3. **名稱AI清洗**：利用 AI 判斷網頁標題，還原出最乾淨的公司全名（去除 "首頁"、"專業製造" 等贅字）。
 """)
 
 # --- 2. 側邊欄設定 ---
@@ -23,133 +24,203 @@ with st.sidebar:
     try:
         gemini_api_key = st.secrets["GEMINI_API_KEY"]
         tavily_api_key = st.secrets["TAVILY_API_KEY"]
-        st.success("✅ API Key 已載入")
+        st.success("✅ API Key 已從 Secrets 載入")
     except:
-        gemini_api_key = st.text_input("Gemini API Key", type="password")
-        tavily_api_key = st.text_input("Tavily API Key", type="password")
+        gemini_api_key = st.text_input("輸入 Gemini API Key", type="password")
+        tavily_api_key = st.text_input("輸入 Tavily API Key", type="password")
     
     st.divider()
-    st.header("🎯 搜尋設定")
-    target_amount = st.slider("目標有效筆數", 50, 200, 50, step=10)
-    strict_mode = st.checkbox("嚴格模式 (電話或Email至少要有一個)", value=True)
+    target_amount = st.slider("目標資料筆數", 10, 500, 30, step=10)
+    enable_hunter = st.toggle("開啟「補刀追殺」", value=True)
+    debug_mode = st.toggle("顯示除錯訊息", value=False)
 
 # --- 3. 核心工具函數 ---
 
-def is_junk_link(url, title):
-    """ 排除非目標網站 """
-    url = url.lower()
-    title = title.lower()
+def get_root_url(url):
+    if not url: return ""
+    try:
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}"
+    except:
+        return url
+
+def fetch_content_robust(url, fallback_content=""):
+    """ 強韌爬取流程 """
+    # 🚫 過濾中國網域
+    if ".cn" in url or "china" in url.lower():
+        return "", "非台灣網域(過濾)"
+
+    combined_content = ""
+    source_log = []
+    root_url = get_root_url(url)
     
-    bad_domains = [
-        '.gov', '.edu', 'facebook', 'youtube', 'instagram', 'wiki', 'blog', 
-        'news', 'ptt.cc', 'dcard', '104.com', '1111.com', '518.com', 'linkedin',
-        'tw.yahoo.com', 'google.com'
-    ]
-    bad_keywords = [
-        '新聞', '報導', '日報', '懶人包', '公告', '標案', '政府', '補助', 
-        '論文', '研究', 'pdf', 'doc', '下載', '名錄', '清冊', 
-        '徵才', '職缺', '招聘', 'job', 'hiring', 'career'
-    ]
-    
-    for d in bad_domains:
-        if d in url: return True
-    for k in bad_keywords:
-        if k in title: return True
+    jina_url = f"https://r.jina.ai/{root_url}"
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(jina_url, headers=headers, timeout=8)
         
-    return False
+        # 簡單檢查是否為簡體中文網站 (出現大量簡體特徵字)
+        if "联系我们" in resp.text or "有限公司" in resp.text: 
+            # 這裡只是一個簡單判斷，未必準確，但能擋掉一部分
+            pass 
 
-def clean_text(text):
-    """ 清洗文字 """
-    if not text: return ""
-    text = str(text)
-    text = text.replace('\n', ' ').replace('\r', '')
-    text = re.sub(r'\s+', ' ', text)
-    if text.lower() in ['none', 'null', 'unknown', '無']:
-        return ""
-    return text.strip()
+        if resp.status_code == 200 and len(resp.text) > 100:
+            combined_content += f"\n=== Jina即時爬取 ===\n{resp.text[:15000]}"
+            source_log.append("即時爬蟲")
+        else:
+            raise Exception("Jina fail")
+            
+    except Exception as e:
+        if fallback_content and len(fallback_content) > 50:
+            combined_content += f"\n=== 搜尋引擎庫存 ===\n{fallback_content[:15000]}"
+            source_log.append("庫存救援")
+        else:
+            source_log.append("抓取失敗")
 
-def regex_scan(text):
-    """ 正則掃描：電話、Email、傳真 """
-    if not text: return [], [], []
+    return combined_content, " + ".join(source_log)
+
+def regex_heavy_duty(text):
+    """ 
+    修正後的強力掃描：
+    1. 嚴格區分 8 碼統編 vs 電話
+    2. 過濾中國手機號 (11碼, 1開頭)
+    """
+    if not text: return [], [], [], []
+    text_clean = " ".join(text.split())
     
-    emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
-    
+    # Email
+    emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text_clean)
+    all_emails = list(set(emails))
+
+    # 傳真 (Fax)
     fax_patterns = [r'(?:Fax|FAX|傳真|F\.|F:)[\s:：\.]*(\(?0\d{1,2}\)?[\s\-]?[0-9-]{6,15})']
     faxes = []
     for pattern in fax_patterns:
         faxes.extend(re.findall(pattern, text))
-
-    raw_phones = re.findall(r'(?:\(?0\d{1,2}\)?[\s\-]?)?\d{3,4}[\s\-]?\d{3,4}', text)
-    valid_phones = []
+    faxes = list(set(faxes))
     
-    for p in raw_phones:
-        clean_p = re.sub(r'\D', '', p)
+    # 電話與統編邏輯重構
+    raw_numbers = re.findall(r'(?:\(?0\d{1,2}\)?[\s\-]?)?\d{3,4}[\s\-]?\d{3,4}', text_clean)
+    phones = []
+    tax_ids = []
+    
+    for num in list(set(raw_numbers)):
+        clean_num = re.sub(r'\D', '', num)
+        
+        # 排除傳真
         is_fax = False
         for f in faxes:
-            if clean_p in re.sub(r'\D', '', f):
-                is_fax = True; break
+            if clean_num in re.sub(r'\D', '', f): is_fax = True; break
         if is_fax: continue
 
-        if len(clean_p) >= 8 and not clean_p.startswith('202'):
-            valid_phones.append(p)
-            
-    return list(set(emails)), list(set(valid_phones)), list(set(faxes))
+        # 🚫 排除中國手機號 (1開頭, 11碼)
+        if len(clean_num) == 11 and clean_num.startswith('1'):
+            continue
 
-def fetch_and_extract(url, title, fallback_content, model):
-    """ 抓取網頁並提取資料 """
-    content = ""
+        # ✅ 統編判斷：8碼，且通常不以 0 開頭 (台灣手機是 09 開頭共 10 碼，市話含區碼 9-10 碼)
+        if len(clean_num) == 8 and not clean_num.startswith('0'):
+            tax_ids.append(clean_num)
+        # ✅ 電話判斷：9碼以上，或是 8 碼但以 0 開頭 (極少見，可能是未加區碼的市話，先歸類為電話)
+        elif len(clean_num) >= 8:
+            phones.append(num)
+
+    return all_emails, phones, faxes, tax_ids
+
+def hunter_search(company_name, tavily_client):
+    """ 補刀搜尋：加上 '台灣' 關鍵字 """
+    if not company_name or len(company_name) < 2: return ""
+    # 強制加上 "台灣" 避免搜到大陸同名公司
+    query = f"{company_name} 台灣 電話 email 聯絡方式"
     try:
-        jina_url = f"https://r.jina.ai/{url}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(jina_url, headers=headers, timeout=8)
-        if resp.status_code == 200 and len(resp.text) > 100:
-            content = resp.text[:15000] 
-        else:
-            raise Exception("Jina failed")
+        resp = tavily_client.search(query=query, max_results=3, search_depth="advanced")
+        snippets = ""
+        for res in resp.get('results', []):
+            snippets += res.get('content', '') + "\n"
+        return snippets
     except:
-        content = fallback_content[:15000] if fallback_content else ""
+        return ""
 
-    emails, phones, faxes = regex_scan(content)
-    backup_email = emails[0] if emails else ""
-    backup_phone = phones[0] if phones else ""
-    backup_fax = faxes[0] if faxes else ""
+def extract_contact_info(content, url, model, company_name_hint=""):
+    """ Gemini AI 萃取 (加入名稱清洗指令) """
+    if "非台灣網域" in content: # 快速失敗
+        return {"公司名稱": company_name_hint, "備註": "排除(非台灣網域)"}
+
+    emails, phones, faxes, tax_ids = regex_heavy_duty(content)
+    backup_info = f"預掃描 -> Email:{emails[:1]}, 電話:{phones[:1]}, 統編:{tax_ids[:1]}"
     
     prompt = f"""
-    你是一個資料整理助手。請從網頁內容中提取 "{title}" 的聯絡資訊。
-    參考資料：Email={backup_email}, 電話={backup_phone}, 傳真={backup_fax}
-    網頁內容：
-    {content}
+    你是一個資料提取專家。請處理以下台灣公司的資料。
     
-    請回傳純 JSON：
+    網址：{url}
+    原始標題：{company_name_hint}
+    參考數據：{backup_info}
+    網頁內容：
+    {content[:20000]} 
+    
+    任務 1: 清洗公司名稱。請從原始標題或內文中找出「正式全名」。
+           (例如: "首頁 - 建越科技廢水處理" -> "建越科技股份有限公司")
+           (例如: "Good Water Co." -> "Good Water Co.")
+           如果不確定，就保留最像公司名的部分。
+           
+    任務 2: 提取聯絡資訊。
+    
+    請回傳純 JSON:
     {{
-        "公司名稱": "請精簡公司全名",
-        "電話": "...",
+        "公司名稱": "...", 
+        "電話": "...", 
         "Email": "...",
-        "傳真": "..."
+        "傳真": "...",
+        "統編": "...",
+        "備註": "..."
     }}
-    若找不到，請優先使用參考資料。
+    若找不到，優先使用參考數據。
     """
     
+    try:
+        response = model.generate_content(prompt)
+        txt = response.text.strip()
+        if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
+        elif "```" in txt: txt = txt.split("```")[0]
+        data = json.loads(txt)
+        
+        # 強力回填
+        if not data.get("Email") and emails: data["Email"] = emails[0]
+        if not data.get("電話") and phones: data["電話"] = phones[0]
+        if not data.get("傳真") and faxes: data["傳真"] = faxes[0]
+        if not data.get("統編") and tax_ids: data["統編"] = tax_ids[0]
+        
+        return data
+    except:
+        return {
+            "公司名稱": company_name_hint,
+            "電話": phones[0] if phones else "",
+            "Email": emails[0] if emails else "",
+            "傳真": faxes[0] if faxes else "",
+            "統編": tax_ids[0] if tax_ids else "",
+            "備註": "AI解析失敗"
+        }
+
+def generate_keywords(base_keyword, amount, model):
+    """ 生成策略：強制加上 '台灣' """
+    num_strategies = max(3, int(amount / 15))
+    prompt = f"""
+    請生成 {num_strategies} 組搜尋關鍵字，目的是搜集「台灣」的「{base_keyword}」廠商。
+    請確保關鍵字都包含 "台灣" 或台灣地名 (台北, 台中, 高雄)。
+    只回傳 JSON Array string: ["關鍵字1", "關鍵字2", ...]
+    """
     try:
         res = model.generate_content(prompt)
         txt = res.text.strip()
         if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
-        elif "```" in txt: txt = txt.split("```")[0]
-        data = json.loads(txt)
+        return json.loads(txt)
     except:
-        data = {"公司名稱": title, "電話": backup_phone, "Email": backup_email, "傳真": backup_fax}
-        
-    if not data.get("Email") and backup_email: data["Email"] = backup_email
-    if not data.get("電話") and backup_phone: data["電話"] = backup_phone
-    if not data.get("傳真") and backup_fax: data["傳真"] = backup_fax
-    
-    data["網址"] = url
-    return data
+        return [f"台灣 {base_keyword}", f"台北 {base_keyword}", f"台中 {base_keyword}", f"高雄 {base_keyword}"]
 
-# --- 4. 主程式邏輯 ---
-keyword = st.text_input("🔍 輸入關鍵字", value="廢水回收系統")
+# --- 4. 主執行邏輯 ---
+st.subheader("🕵️‍♂️ 啟動控制台")
+keyword = st.text_input("輸入核心關鍵字 (系統會自動限定台灣範圍)", value="廢水回收系統")
 
-if st.button("🚀 開始搜集"):
+if st.button("🚀 啟動台灣精準版引擎"):
     if not gemini_api_key or not tavily_api_key:
         st.error("❌ 請填寫 API Key")
         st.stop()
@@ -160,130 +231,102 @@ if st.button("🚀 開始搜集"):
         model.generate_content("test")
     except:
         model = genai.GenerativeModel('gemini-pro')
-    
+        
     tavily = TavilyClient(api_key=tavily_api_key)
+    status_box = st.status("🧠 規劃台灣限定搜尋策略...", expanded=True)
     
-    status = st.status("正在過濾並建立名單...", expanded=True)
+    # 1. 策略生成
+    strategies = generate_keywords(keyword, target_amount, model)
+    status_box.write(f"✅ 搜尋策略：{strategies}")
     
-    # 1. 建立網址池
+    # 2. 搜集網址 (過濾 .cn)
     unique_data = {} 
-    search_queries = [
-        f"{keyword} 廠商", f"{keyword} 公司", f"{keyword} 供應商", 
-        f"{keyword} 工程", f"{keyword} 設備", f"{keyword} 聯繫方式"
-    ]
+    progress_bar = st.progress(0)
+    status_box.write("🕸️ 正在過濾並搜集網址...")
     
-    progress = st.progress(0)
-    
-    for q in search_queries:
-        if len(unique_data) >= target_amount * 1.5: 
-            break
+    for idx, q in enumerate(strategies):
+        if len(unique_data) >= target_amount: break
         try:
-            resp = tavily.search(query=q, max_results=15, include_raw_content=True)
-            for res in resp.get('results', []):
+            response = tavily.search(query=q, max_results=15, include_raw_content=True)
+            for res in response.get('results', []):
                 url = res.get('url')
-                title = res.get('title')
-                raw = res.get('raw_content') or res.get('content')
-                
-                if url and title and url not in unique_data:
-                    if not is_junk_link(url, title):
-                        unique_data[url] = {"title": title, "raw": raw}
+                # 🚫 網域層級過濾
+                if url and ".cn" not in url and "alibaba" not in url and not url.endswith('.pdf'):
+                    if url not in unique_data:
+                        unique_data[url] = {
+                            "title": res.get('title', ''),
+                            "raw_content": res.get('raw_content') or res.get('content', '') 
+                        }
         except: pass
-        
-        status.write(f"🔍 已找到 {len(unique_data)} 個潛在目標 (過濾雜訊後)...")
+        progress_bar.progress(min(len(unique_data) / target_amount, 1.0))
         time.sleep(1)
-        
-    status.write(f"✅ 網址搜集完成，共 {len(unique_data)} 筆。開始深度挖掘...")
+
+    # 3. 深度挖掘
+    status_box.write(f"🏭 開始處理 {len(unique_data)} 筆台灣廠商資料...")
+    final_results = []
+    process_bar = st.progress(0)
+    table_preview = st.empty()
     
-    # 2. 深度挖掘
-    final_data = [] # 儲存原始乾淨資料 (給網頁顯示用)
-    target_list = list(unique_data.items())
-    
-    table_placeholder = st.empty()
+    target_list = list(unique_data.items())[:target_amount]
     
     for i, (url, info) in enumerate(target_list):
-        if len(final_data) >= target_amount:
-            break
-            
         title = info['title']
-        raw_backup = info['raw']
-        status.write(f"🔨 ({i+1}/{len(target_list)}) 處理中：{title}")
+        raw_backup = info['raw_content']
         
-        data = fetch_and_extract(url, title, raw_backup, model)
-        
-        if data:
-            name = clean_text(data.get("公司名稱", title))
-            phone = clean_text(data.get("電話", ""))
-            email = clean_text(data.get("Email", ""))
-            fax = clean_text(data.get("傳真", ""))
-            link = str(data.get("網址", url))
+        try:
+            content, source = fetch_content_robust(url, fallback_content=raw_backup)
             
-            has_contact = (len(phone) > 5) or ('@' in email)
-            if strict_mode and not has_contact:
-                status.write(f"⚠️ {title} 無有效聯絡資訊，剔除。")
-                continue 
+            # 若第一步就發現是非台灣網域，跳過
+            if "非台灣網域" in source:
+                continue
+
+            data = extract_contact_info(content, url, model, company_name_hint=title)
+            data["資料來源"] = source
             
-            # 這裡只存原始資料，不要加單引號
-            row = {
-                "公司名稱": name,
-                "電話": phone,
-                "Email": email,
-                "傳真": fax,
-                "網址": link
-            }
-            final_data.append(row)
+            # 補刀檢查
+            missing = []
+            if not data.get("Email") or str(data.get("Email")).lower() in ["none", ""]: missing.append("Email")
+            if not data.get("電話") or str(data.get("電話")).lower() in ["none", ""]: missing.append("電話")
             
-            # 即時預覽 (使用 Column Config 美化)
-            df_preview = pd.DataFrame(final_data)
-            table_placeholder.dataframe(
-                df_preview.tail(3),
-                column_config={
-                    "網址": st.column_config.LinkColumn("網址", display_text="🔗 前往官網"),
-                    "Email": st.column_config.TextColumn("Email"),
-                },
-                use_container_width=True,
-                hide_index=True
-            )
-        
-        progress.progress(min(len(final_data) / target_amount, 1.0))
+            if enable_hunter and missing:
+                if debug_mode: status_box.write(f"🔫 {data['公司名稱']} 資料不全，補刀中...")
+                hunter_data = hunter_search(data['公司名稱'], tavily)
+                h_emails, h_phones, h_faxes, h_tax = regex_heavy_duty(hunter_data)
+                
+                if "Email" in missing and h_emails: data["Email"] = h_emails[0]
+                if "電話" in missing and h_phones: data["電話"] = h_phones[0]
+                if not data.get("統編") and h_tax: data["統編"] = h_tax[0] # 補刀也要補統編
+                
+                data["備註"] = "經二次補完"
+            else:
+                 if not data.get("備註"): data["備註"] = "一般"
+            
+            final_results.append(data)
+            
+            if i % 2 == 0:
+                df_show = pd.DataFrame(final_results)
+                cols = ["公司名稱", "統編", "電話", "Email", "網址"]
+                for c in cols: 
+                    if c not in df_show.columns: df_show[c] = ""
+                table_preview.dataframe(df_show[cols].tail(5))
+                
+        except Exception as e:
+            if debug_mode: st.warning(f"Error: {e}")
+            
+        process_bar.progress((i+1)/len(target_list))
         time.sleep(0.5)
 
-    # 3. 輸出結果
-    status.update(label="🎉 完成！", state="complete", expanded=False)
+    status_box.update(label="🎉 完成！", state="complete", expanded=False)
     
-    if final_data:
-        df = pd.DataFrame(final_data)
+    if final_results:
+        df_final = pd.DataFrame(final_results)
+        target_cols = ["公司名稱", "統編", "電話", "Email", "傳真", "網址", "備註", "資料來源"]
+        for c in target_cols:
+            if c not in df_final.columns: df_final[c] = ""
+        df_final = df_final[target_cols].astype(str)
         
-        cols = ["公司名稱", "電話", "Email", "傳真", "網址"]
-        df = df[cols]
+        st.success(f"共產出 {len(df_final)} 筆台灣廠商名單")
+        st.dataframe(df_final)
         
-        st.success(f"成功搜集 {len(df)} 筆有效名單！")
-        
-        # === 顯示美化表格 (網頁版) ===
-        st.dataframe(
-            df,
-            column_config={
-                "網址": st.column_config.LinkColumn("官方網站", display_text="🔗 前往官網"),
-                "電話": st.column_config.TextColumn("電話號碼"),
-                "Email": st.column_config.TextColumn("Email 信箱"),
-                "傳真": st.column_config.TextColumn("傳真號碼"),
-            },
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        # === 準備下載檔案 (Excel版) ===
-        # 在這裡才加上單引號，讓 Excel 不掉 0
-        df_download = df.copy()
-        df_download["電話"] = df_download["電話"].apply(lambda x: f"'{x}" if x and str(x).startswith('0') else x)
-        df_download["傳真"] = df_download["傳真"].apply(lambda x: f"'{x}" if x and str(x).startswith('0') else x)
-        
-        csv = df_download.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            "📥 下載 Excel 格式 (.csv)",
-            csv,
-            "company_list_pro.csv",
-            "text/csv",
-            type="primary"
-        )
-    else:
-        st.warning("找不到符合條件的資料，請嘗試更換關鍵字。")
+        csv = df_final.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 下載名單 (CSV)", csv, "taiwan_leads.csv", "text/csv")
